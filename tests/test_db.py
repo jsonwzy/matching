@@ -54,6 +54,42 @@ def test_user_crud():
         assert user["city"] == "深圳"
 
 
+def test_user_profile_roundtrip_with_income_family():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.upsert_author({"id": "u1", "nickname": "Alice"})
+
+        ok = db.update_user_profile(
+            "u1",
+            {
+                "gender": "女",
+                "age": 26,
+                "height": 162,
+                "education": ["本科"],
+                "locations": ["深圳"],
+                "occupations": ["运营"],
+                "income": "月入2w",
+                "family": "深圳本地人",
+                "interests": ["看电影", "爬山"],
+                "requirements": {
+                    "preferred_gender": "男",
+                    "age_range": {"min": 26, "max": 32},
+                    "min_height": 175,
+                    "min_income": "稳定收入",
+                },
+            },
+            confidence=0.8,
+        )
+        assert ok
+
+        prof = db.get_user_profile("u1")
+        assert prof["age"] == 26
+        assert prof["income"] == "月入2w"
+        assert prof["family"] == "深圳本地人"
+        assert prof["requirements"]["min_income"] == "稳定收入"
+        assert prof["interests"] == ["看电影", "爬山"]
+
+
 def test_match_workflow():
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")

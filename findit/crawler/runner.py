@@ -235,6 +235,82 @@ class CrawlRunner:
         logger.info("Step 3 complete: scraped %d profiles", scraped)
         return scraped
 
+    def step4_extract_user_profiles(self, limit: int = 50) -> int:
+        """Run AI tag extraction over authors that have step3 data but
+        haven't been parsed yet.
+
+        Doesn't touch XHS — only Claude API. Pulls each author + all
+        their content (their own posts + comments they wrote) and writes
+        the parsed result to user_profiles.
+
+        Returns count of authors processed (skips silently if the
+        Anthropic API key isn't configured).
+        """
+        if not settings.anthropic_api_key:
+            logger.info("step4 skipped: ANTHROPIC_API_KEY not set")
+            return 0
+
+        # Local import — keeps the crawler runnable without anthropic
+        # installed when only step1–3 are needed.
+        from findit.ai.tag_extractor import AITagExtractor
+
+        extractor = AITagExtractor()
+        with self.db._conn() as conn:
+            rows = conn.execute(
+                """SELECT a.id, a.nickname, a.bio, a.ip_location, a.age_tag
+                   FROM authors a
+                   LEFT JOIN user_profiles up ON up.author_id = a.id
+                   WHERE a.profile_crawled_at IS NOT NULL
+                     AND up.author_id IS NULL
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            authors = [dict(r) for r in rows]
+
+        processed = 0
+        for author in authors:
+            posts = self.db.get_author_posts(author["id"])
+            if not posts:
+                continue
+            # Concatenate all content the author authored (their own
+            # post titles + their dating-intent comments) into one
+            # synthetic post for extraction. This gives the LLM the
+            # widest context per author with one API call.
+            combined = "\n---\n".join(
+                (p.get("content") or "").strip() for p in posts
+                if (p.get("content") or "").strip()
+            )
+            if not combined:
+                continue
+            synthetic = {
+                "id": f"synthetic_{author['id']}",
+                "content": combined,
+                "source_type": "post",
+            }
+            result = extractor.extract_from_post(synthetic, author)
+            if result is None:
+                continue
+            data = result.to_dict()
+            # Flatten the nested personal_info dict to top-level keys
+            # that update_user_profile expects.
+            flat = {
+                **data["personal_info"],
+                "locations": [data["personal_info"]["location"]] if data["personal_info"].get("location") else [],
+                "occupations": [data["personal_info"]["occupation"]] if data["personal_info"].get("occupation") else [],
+                "education": [data["personal_info"]["education"]] if data["personal_info"].get("education") else [],
+                "interests": data.get("extracted_tags", []),
+                "requirements": data["requirements"],
+                "raw_text": combined,
+            }
+            self.db.update_user_profile(
+                author["id"], flat,
+                confidence=data.get("confidence_score", 50) / 100.0,
+            )
+            processed += 1
+
+        logger.info("Step 4 complete: parsed %d user profiles", processed)
+        return processed
+
     async def run_full_pipeline(self, include_profiles: bool = False) -> dict[str, int]:
         """Run the crawl pipeline.
 

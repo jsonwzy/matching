@@ -52,10 +52,12 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     occupations TEXT DEFAULT '[]',         -- JSON array
     height INTEGER,
     education TEXT DEFAULT '[]',           -- JSON array
+    income TEXT,                           -- free text e.g. "月入2w" / "30万年薪"
+    family TEXT,                           -- free text e.g. "独生女" / "深圳本地人"
     status TEXT,                           -- relationship status
     personality TEXT DEFAULT '[]',         -- JSON array
     interests TEXT DEFAULT '[]',           -- JSON array
-    requirements TEXT DEFAULT '{}',        -- JSON object
+    requirements TEXT DEFAULT '{}',        -- JSON object incl. min_income, age_range, ...
     confidence_score REAL DEFAULT 0.0,     -- 0.0 - 1.0
     profile_complete REAL DEFAULT 0.0,     -- 0.0 - 1.0
     data_source TEXT,                      -- 'crawler_inferred' | 'self_reported'
@@ -184,6 +186,14 @@ class Database:
                 "ALTER TABLE authors ADD COLUMN profile_crawled_at TEXT"
             )
 
+        existing_up = {
+            r["name"] for r in conn.execute("PRAGMA table_info(user_profiles)").fetchall()
+        }
+        if existing_up and "income" not in existing_up:
+            conn.execute("ALTER TABLE user_profiles ADD COLUMN income TEXT")
+        if existing_up and "family" not in existing_up:
+            conn.execute("ALTER TABLE user_profiles ADD COLUMN family TEXT")
+
     # ── Posts ────────────────────────────────────────────────────────────
 
     def upsert_post(self, post: dict[str, Any]) -> None:
@@ -266,10 +276,11 @@ class Database:
 
                 conn.execute(
                     """INSERT INTO user_profiles
-                       (author_id, gender, age, locations, occupations, height, education, status,
-                        personality, interests, requirements, confidence_score, data_source,
-                        source_post_id, raw_text_summary, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       (author_id, gender, age, locations, occupations, height, education,
+                        income, family, status, personality, interests, requirements,
+                        confidence_score, data_source, source_post_id, raw_text_summary,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(author_id) DO UPDATE SET
                        gender=excluded.gender,
                        age=excluded.age,
@@ -277,6 +288,8 @@ class Database:
                        occupations=excluded.occupations,
                        height=excluded.height,
                        education=excluded.education,
+                       income=excluded.income,
+                       family=excluded.family,
                        status=excluded.status,
                        personality=excluded.personality,
                        interests=excluded.interests,
@@ -291,6 +304,8 @@ class Database:
                         json.dumps(profile.get('occupations', []), ensure_ascii=False),
                         profile.get('height'),
                         json.dumps(profile.get('education', []), ensure_ascii=False),
+                        profile.get('income'),
+                        profile.get('family'),
                         profile.get('status'),
                         json.dumps(profile.get('personality', []), ensure_ascii=False),
                         json.dumps(profile.get('interests', []), ensure_ascii=False),

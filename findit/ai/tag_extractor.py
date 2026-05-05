@@ -42,7 +42,9 @@ _TAG_EXTRACTION_USER_PROMPT = """## 待分析的内容
         "height": <整数身高(cm)或null>,
         "education": <"高中" / "大专" / "本科" / "硕士" / "博士" / null>,
         "location": <"城市"或null>,
-        "occupation": <"职业"或null>
+        "occupation": <"职业"或null>,
+        "income": <自由文本如"月入2w" / "30万年薪" / "中产家庭"或null>,
+        "family": <自由文本如"独生女" / "深圳本地人" / "父母都是医生"或null>
     }},
     "requirements": {{
         "preferred_gender": <"男" / "女" / "不限" / null>,
@@ -52,7 +54,8 @@ _TAG_EXTRACTION_USER_PROMPT = """## 待分析的内容
         }},
         "min_height": <最小身高(cm)或null>,
         "education": <"本科以上" / "大专以上" / "不限" / null>,
-        "location": <期望地区或null>
+        "location": <期望地区或null>,
+        "min_income": <自由文本如"月入1w以上" / "稳定收入"或null>
     }},
     "dating_intent": {{
         "seriousness_score": <0-100整数, 100代表非常认真找对象，0代表只是随便聊聊>,
@@ -75,6 +78,8 @@ class PersonalInfo:
     education: str | None
     location: str | None
     occupation: str | None
+    income: str | None = None
+    family: str | None = None
 
 
 @dataclass
@@ -84,6 +89,7 @@ class Requirements:
     min_height: int | None
     education: str | None
     location: str | None
+    min_income: str | None = None
 
 
 @dataclass
@@ -111,6 +117,8 @@ class TagExtractionResult:
                 "education": self.personal_info.education,
                 "location": self.personal_info.location,
                 "occupation": self.personal_info.occupation,
+                "income": self.personal_info.income,
+                "family": self.personal_info.family,
             },
             "requirements": {
                 "preferred_gender": self.requirements.preferred_gender,
@@ -118,6 +126,7 @@ class TagExtractionResult:
                 "min_height": self.requirements.min_height,
                 "education": self.requirements.education,
                 "location": self.requirements.location,
+                "min_income": self.requirements.min_income,
             },
             "dating_intent": {
                 "seriousness_score": self.dating_intent.seriousness_score,
@@ -227,6 +236,8 @@ class AITagExtractor:
             education=personal_info_data.get("education"),
             location=personal_info_data.get("location"),
             occupation=personal_info_data.get("occupation"),
+            income=personal_info_data.get("income"),
+            family=personal_info_data.get("family"),
         )
 
         requirements_data = data.get("requirements", {})
@@ -236,6 +247,7 @@ class AITagExtractor:
             min_height=requirements_data.get("min_height"),
             education=requirements_data.get("education"),
             location=requirements_data.get("location"),
+            min_income=requirements_data.get("min_income"),
         )
 
         dating_intent_data = data.get("dating_intent", {})
