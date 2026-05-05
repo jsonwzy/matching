@@ -17,6 +17,41 @@ import re
 
 logger = logging.getLogger(__name__)
 
+# ── City / province / district maps ────────────────────────────────────
+# XHS shows IP only at province level (or municipality for 直辖市). The user
+# filter uses two signals together:
+#   1. Content (bio + post text + notes) explicitly mentioning the target
+#      city or one of its districts → the user is in/around that city,
+#      regardless of where they were when they commented.
+#   2. Profile-page ip_location matching the city's province → the only IP
+#      granularity XHS gives us; coarser than ideal but sufficient.
+
+CITY_PROVINCE_MAP = {
+    # 广东
+    "深圳": "广东", "广州": "广东", "东莞": "广东", "佛山": "广东", "珠海": "广东",
+    # 直辖市 (province == city)
+    "北京": "北京", "上海": "上海", "天津": "天津", "重庆": "重庆",
+    # 长三角
+    "杭州": "浙江", "宁波": "浙江",
+    "南京": "江苏", "苏州": "江苏",
+    # 其它
+    "成都": "四川", "武汉": "湖北", "西安": "陕西",
+}
+
+CITY_DISTRICTS = {
+    "深圳": ["福田", "罗湖", "南山", "宝安", "龙岗", "龙华",
+             "坪山", "盐田", "光明", "大鹏"],
+    "上海": ["浦东", "黄浦", "徐汇", "长宁", "静安", "普陀",
+             "杨浦", "虹口", "闵行", "宝山", "嘉定", "松江",
+             "金山", "青浦", "奉贤", "崇明"],
+    "北京": ["东城", "西城", "朝阳", "海淀", "丰台", "石景山",
+             "通州", "昌平", "大兴", "顺义", "房山"],
+    "广州": ["天河", "越秀", "海珠", "白云", "黄埔", "番禺",
+             "荔湾", "南沙", "增城", "从化"],
+    "杭州": ["西湖", "上城", "下城", "拱墅", "滨江", "余杭",
+             "萧山", "临平", "钱塘", "富阳"],
+}
+
 # ── Rule A: matchmaker keyword ──────────────────────────────────────────
 
 MATCHMAKER_KEYWORD = "红娘"
@@ -152,6 +187,9 @@ class UserFilter:
     """Per-user filters applied when generating matches.
 
     Currently only geographic location.
+
+    Location check is two-signal: content mention (city/district name) OR
+    profile-IP province match. See CITY_PROVINCE_MAP / CITY_DISTRICTS.
     """
 
     def __init__(
@@ -166,21 +204,46 @@ class UserFilter:
         self.age_min = age_min
         self.age_max = age_max
 
-    def evaluate(self, author: dict) -> tuple[bool, str | None]:
-        return self._check_location(author)
+    def evaluate(
+        self,
+        author: dict,
+        posts: list[dict] | None = None,
+    ) -> tuple[bool, str | None]:
+        return self._check_location(author, posts or [])
 
-    def _check_location(self, author: dict) -> tuple[bool, str | None]:
+    def _check_location(
+        self, author: dict, posts: list[dict]
+    ) -> tuple[bool, str | None]:
         if self.allow_remote or not self.user_city:
             return True, None
 
+        # Signal 1: content mentions the city or a known district.
+        # If a user explicitly says "在深圳" / "深圳福田" / "宝安西乡", they're
+        # in/around that city — no need to interrogate IP further.
+        haystack_parts = [
+            author.get("bio") or "",
+            author.get("nickname") or "",
+        ]
+        haystack_parts.extend((p.get("content") or "") for p in posts)
+        for note in _parse_notes(author):
+            haystack_parts.append(note.get("title") or "")
+            haystack_parts.append(note.get("content") or "")
+        haystack = " ".join(haystack_parts)
+        tokens = [self.user_city] + CITY_DISTRICTS.get(self.user_city, [])
+        if any(tok and tok in haystack for tok in tokens):
+            return True, None
+
+        # Signal 2: profile-page IP at province (or municipality) granularity.
         location = author.get("ip_location") or ""
         if not location:
-            return True, None  # Unknown location, keep for now
+            # No profile yet (Step 3 hasn't run). Don't reject; let later
+            # passes decide once the profile is filled in.
+            return True, None
+        province = CITY_PROVINCE_MAP.get(self.user_city, self.user_city)
+        if self.user_city in location or province in location:
+            return True, None
 
-        if self.user_city not in location:
-            return False, f"location_mismatch:{location}"
-
-        return True, None
+        return False, f"location_mismatch:{location}"
 
 
 # ── Backward compatibility alias ────────────────────────────────────────

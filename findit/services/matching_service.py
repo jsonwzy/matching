@@ -77,8 +77,12 @@ class MatchingService:
             author_dict = {
                 "ip_location": c.get("ip_location"),
                 "age_tag": c.get("age_tag"),
+                "bio": c.get("bio"),
+                "nickname": c.get("nickname"),
+                "notes_summary": c.get("notes_summary"),
             }
-            keep, _ = user_filter.evaluate(author_dict)
+            posts_for_check = [{"content": c.get("content") or ""}]
+            keep, _ = user_filter.evaluate(author_dict, posts=posts_for_check)
             if keep:
                 filtered_candidates.append(c)
 

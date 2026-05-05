@@ -573,7 +573,14 @@ class Database:
 
         Used by the matching service to get candidates for per-user scoring.
         Returns authors joined with their posts.
+
+        SQL prefilter is intentionally loose — it matches on city OR province
+        OR content mentioning the city. Final-grain filtering happens in
+        UserFilter, which also covers districts. The SQL just ensures we
+        don't drop rows that UserFilter would later accept.
         """
+        from findit.ai.filter_rules import CITY_PROVINCE_MAP
+
         with self._conn() as conn:
             query = """SELECT p.*, a.nickname, a.ip_location, a.bio, a.age_tag,
                        a.is_real_person, a.notes_summary, a.followers, a.avatar_url
@@ -583,8 +590,13 @@ class Database:
                        AND a.is_real_person IS NOT NULL"""
             params: list[Any] = []
             if city:
-                query += " AND a.ip_location LIKE ?"
-                params.append(f"%{city}%")
+                province = CITY_PROVINCE_MAP.get(city, city)
+                query += (
+                    " AND (a.ip_location LIKE ? OR a.ip_location LIKE ?"
+                    "      OR a.ip_location IS NULL OR a.ip_location = ''"
+                    "      OR p.content LIKE ? OR a.bio LIKE ?)"
+                )
+                params.extend([f"%{city}%", f"%{province}%", f"%{city}%", f"%{city}%"])
             query += " ORDER BY p.crawled_at DESC LIMIT ?"
             params.append(limit)
             rows = conn.execute(query, params).fetchall()

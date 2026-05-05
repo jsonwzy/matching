@@ -163,19 +163,42 @@ class TestSharedFilterMinQuality:
 
 
 class TestUserFilter:
-    """Per-user location filter (unchanged from previous behavior)."""
+    """Per-user location filter — content mention OR province match."""
 
-    def test_filters_wrong_city(self):
+    def test_filters_wrong_province(self):
+        # IP shows a different province AND no content mentions Shenzhen
         f = UserFilter(user_city="深圳", allow_remote=False)
-        author = {"ip_location": "北京"}
+        author = {"ip_location": "北京", "bio": "爱生活"}
         keep, reason = f.evaluate(author)
         assert keep is False
         assert "location" in reason
 
-    def test_allows_same_city(self):
+    def test_allows_when_ip_is_full_city(self):
         f = UserFilter(user_city="深圳")
         author = {"ip_location": "广东深圳"}
         keep, _ = f.evaluate(author)
+        assert keep is True
+
+    def test_allows_when_ip_is_province_only(self):
+        # XHS shows province only — '广东' is the closest grain we get for SZ
+        f = UserFilter(user_city="深圳")
+        author = {"ip_location": "广东"}
+        keep, _ = f.evaluate(author)
+        assert keep is True
+
+    def test_allows_when_content_mentions_city(self):
+        # Even if profile IP is missing or wrong, an explicit mention of
+        # the target city in the user's content is sufficient.
+        f = UserFilter(user_city="深圳")
+        author = {"ip_location": "上海", "bio": "在深圳福田工作"}
+        keep, _ = f.evaluate(author)
+        assert keep is True
+
+    def test_allows_when_content_mentions_district(self):
+        f = UserFilter(user_city="深圳")
+        author = {"ip_location": "北京"}
+        posts = [{"content": "01宝安西乡蹲一个女孩子"}]
+        keep, _ = f.evaluate(author, posts=posts)
         assert keep is True
 
     def test_allows_remote_when_configured(self):
@@ -185,10 +208,19 @@ class TestUserFilter:
         assert keep is True
 
     def test_allows_unknown_location(self):
+        # No IP yet (Step 3 hasn't run); don't reject — wait for profile.
         f = UserFilter(user_city="深圳")
         author = {"ip_location": ""}
         keep, _ = f.evaluate(author)
         assert keep is True
+
+    def test_municipality_target(self):
+        # 直辖市: city == province in the map
+        f = UserFilter(user_city="上海")
+        keep1, _ = f.evaluate({"ip_location": "上海"})
+        keep2, _ = f.evaluate({"ip_location": "广东"})
+        assert keep1 is True
+        assert keep2 is False
 
 
 class TestRuleFilterCompat:
@@ -202,6 +234,7 @@ class TestRuleFilterCompat:
 
     def test_filters_by_location(self):
         f = RuleFilter(user_city="深圳", allow_remote=False)
+        # IP=北京 (different province) AND no city mention in content
         author = {"nickname": "小花", "bio": "爱生活", "ip_location": "北京"}
         keep, reason = f.evaluate(author)
         assert keep is False

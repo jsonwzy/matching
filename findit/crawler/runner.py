@@ -54,11 +54,14 @@ class CrawlRunner:
                 for note in results:
                     author = self.db.get_author(note["user_id"])
                     if not author:
+                        # ip_location is intentionally omitted: search cards
+                        # don't carry it, and even when they do the value is
+                        # not the user's home IP. Step 3 (profile crawl) is
+                        # the source of truth.
                         self.db.upsert_author({
                             "id": note["user_id"],
                             "nickname": note.get("user_nickname"),
                             "avatar_url": note.get("user_avatar"),
-                            "ip_location": note.get("ip_location"),
                         })
 
                     self.db.upsert_post({
@@ -82,14 +85,19 @@ class CrawlRunner:
 
     async def step2_scrape_comments(self, max_posts: int = 50) -> int:
         """Scrape comments on recent posts and find dating-intent commenters."""
-        posts = self.db.get_scored_posts(limit=max_posts)
-        if not posts:
-            with self.db._conn() as conn:
-                rows = conn.execute(
-                    "SELECT * FROM posts WHERE source_type='post' ORDER BY crawled_at DESC LIMIT ?",
-                    (max_posts,),
-                ).fetchall()
-                posts = [dict(r) for r in rows]
+        # Always filter to source_type='post' — without this, prior step2 runs
+        # save dating comments as posts (with synthesized id "comment_<id>"),
+        # and the next step2 picks those up and tries to scrape them as notes,
+        # wasting half the crawl budget on rows that always return 0 comments.
+        with self.db._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM posts
+                   WHERE source_type='post'
+                   ORDER BY crawled_at DESC
+                   LIMIT ?""",
+                (max_posts,),
+            ).fetchall()
+            posts = [dict(r) for r in rows]
 
         found = 0
         for post in posts:
@@ -103,11 +111,13 @@ class CrawlRunner:
 
                 author = self.db.get_author(user_id)
                 if not author:
+                    # ip_location from comment is the IP at comment-time,
+                    # not the user's home IP. Step 3 (profile crawl) sets
+                    # the authoritative ip_location.
                     self.db.upsert_author({
                         "id": user_id,
                         "nickname": c.get("nickname"),
                         "avatar_url": c.get("avatar"),
-                        "ip_location": c.get("ip_location"),
                     })
 
                 comment_id = f"comment_{c['comment_id']}"
@@ -135,6 +145,10 @@ class CrawlRunner:
         filtering get a profile crawl. After a successful fetch we stamp
         `profile_crawled_at` so `crawler_service.run_shared_filter(final=True)`
         knows they're ready for final evaluation.
+
+        Profile pages are rate-limited much more aggressively than search
+        or comment pages. We pace via the client's `_profile_sleep` and
+        take a longer pause every `crawl_profile_batch_size` profiles.
         """
         author_ids = self.db.get_unscraped_author_ids(limit=limit)
         with self.db._conn() as conn:
@@ -150,14 +164,24 @@ class CrawlRunner:
                     author_ids.append(r["id"])
 
         scraped = 0
-        for uid in author_ids[:limit]:
+        batch_size = settings.crawl_profile_batch_size
+        batch_pause = settings.crawl_profile_batch_pause_sec
+        for i, uid in enumerate(author_ids[:limit]):
+            if i > 0 and i % batch_size == 0:
+                logger.info(
+                    "step3 batch pause: scraped %d so far, sleeping %.0fs",
+                    i, batch_pause,
+                )
+                await asyncio.sleep(batch_pause)
+
             profile = await self.client.get_user_profile(uid)
             if not profile.get("nickname"):
                 continue
 
-            notes, _ = await self.client.get_user_notes(uid)
-            profile["notes_summary"] = notes[:10]
-
+            # Skip get_user_notes for now — extra navigations per profile
+            # double the rate-limit pressure and step 3 currently doesn't
+            # use notes_summary in the matchmaker filter beyond optional
+            # content matching, which the bio + comment text already cover.
             self.db.upsert_author(profile)
             self.db.mark_profile_crawled(uid)
             scraped += 1

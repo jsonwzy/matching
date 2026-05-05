@@ -27,6 +27,15 @@ class Settings(BaseSettings):
     crawl_interval_hours: int = 24
     crawl_request_delay_min: float = 2.0
     crawl_request_delay_max: float = 5.0
+    # Profile-page scraping has a much tighter rate limit than search /
+    # comment pages — bursts at the search-page cadence (~9s/req) trip XHS
+    # 风控 ("请求太频繁") within ~10 requests. Use a longer, more
+    # human-paced delay between profile pages.
+    crawl_profile_delay_min: float = 20.0
+    crawl_profile_delay_max: float = 40.0
+    # After every N profiles, take an extra long break (no requests at all).
+    crawl_profile_batch_size: int = 5
+    crawl_profile_batch_pause_sec: float = 180.0
     crawl_max_retries: int = 3
     crawl_retry_base_delay: float = 5.0
     crawl_request_timeout: float = 30.0

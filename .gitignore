@@ -7,7 +7,14 @@ build/
 .eggs/
 *.db
 *.sqlite
-!data/findit.db  # Allow our main database
+*.db-shm
+*.db-wal
+# Allow our main database
+!data/findit.db
+# Backup snapshots like data/findit.db.before_backfill
+data/findit.db.*
+# Diagnostic screenshots
+data/*.png
 .env
 .env.*
 !.env.example

@@ -462,25 +462,51 @@ class XHSClient:
                 out.append(c)
         return out
 
+    async def _profile_sleep(self) -> None:
+        """Profile pages need a much longer, human-paced delay (see
+        feedback_xhs_rate_limit memory)."""
+        await asyncio.sleep(random.uniform(
+            settings.crawl_profile_delay_min,
+            settings.crawl_profile_delay_max,
+        ))
+
     async def get_user_profile(self, user_id: str) -> dict[str, Any]:
-        """Scrape /user/profile/<user_id>. Returns minimal info."""
-        await self._sleep()
+        """Scrape /user/profile/<user_id>. Returns nickname/bio/IP/age.
+
+        DOM contract (verified on a real profile page 2026-05-05):
+          .user-name      → nickname
+          .user-desc      → bio
+          .user-IP        → "IP属地：广东"  (province granularity)
+          .user-info      → aggregate text including age + city when present,
+                            e.g. "26岁广东深圳5关注69粉丝226获赞与收藏"
+          .basic-info     → "<nick>小红书号：<id> IP属地：<prov>"
+        """
+        await self._profile_sleep()
         try:
             await self._navigate(f"{WWW_HOST}/user/profile/{user_id}", settle_sec=4.0)
             data = await self._page.evaluate(r"""
                 () => {
-                    const nick = document.querySelector('.user-nickname, .user-name, .nickname');
-                    const desc = document.querySelector('.user-desc, .user-bio');
-                    const ip = document.querySelector('.ip-info, .location');
-                    const avatar = document.querySelector('.user-avatar img, .avatar img');
-                    const stats = [...document.querySelectorAll('.user-info .count, .data-info .count, .num')]
-                        .map(e => (e.textContent || '').trim());
+                    const text = sel => {
+                        const e = document.querySelector(sel);
+                        return e ? (e.textContent || '').trim() : '';
+                    };
+                    const nick = text('.user-name') || text('.user-nickname') || text('.nickname');
+                    const desc = text('.user-desc') || text('.user-bio');
+                    const ip_raw = text('.user-IP')
+                                || text('[class*="user-IP"]')
+                                || text('[class*="user-ip"]');
+                    const aggregate = text('.user-info') || text('.basic-info') || '';
+                    const avatar = document.querySelector(
+                        '.user-avatar img, .avatar img, img[class*="avatar"]'
+                    );
+                    // strip "IP属地：" prefix → just the province/municipality
+                    const ip = ip_raw.replace(/^IP属地[：:]\s*/, '').trim();
                     return {
-                        nickname: nick ? nick.textContent.trim() : '',
-                        bio: desc ? desc.textContent.trim() : '',
-                        ip_location: ip ? ip.textContent.trim() : '',
+                        nickname: nick,
+                        bio: desc,
+                        ip_location: ip,
+                        aggregate_text: aggregate,
                         avatar_url: avatar ? (avatar.getAttribute('src') || '') : '',
-                        stats,
                     };
                 }
             """)
@@ -488,22 +514,27 @@ class XHSClient:
             logger.exception("get_user_profile failed for %s", user_id)
             return {"id": user_id}
 
-        def _safe_int(v):
-            try:
-                return int(re.sub(r"\D", "", str(v) or "0") or 0)
-            except Exception:
-                return 0
-        stats = data.get("stats") or [] if isinstance(data, dict) else []
+        if not isinstance(data, dict):
+            return {"id": user_id}
+
+        agg = data.get("aggregate_text") or ""
+        age_match = re.search(r"(\d{1,2})岁", agg)
+        age_tag = age_match.group(1) + "岁" if age_match else ""
+
         return {
             "id": user_id,
-            "nickname": data.get("nickname", "") if isinstance(data, dict) else "",
-            "avatar_url": data.get("avatar_url", "") if isinstance(data, dict) else "",
-            "ip_location": data.get("ip_location", "") if isinstance(data, dict) else "",
-            "bio": data.get("bio", "") if isinstance(data, dict) else "",
-            "age_tag": "",
-            "followers": _safe_int(stats[0]) if len(stats) > 0 else 0,
-            "following": _safe_int(stats[1]) if len(stats) > 1 else 0,
-            "likes_collected": _safe_int(stats[2]) if len(stats) > 2 else 0,
+            "nickname": data.get("nickname", ""),
+            "avatar_url": data.get("avatar_url", ""),
+            "ip_location": data.get("ip_location", ""),
+            "bio": data.get("bio", ""),
+            "age_tag": age_tag,
+            # Profile aggregate text often carries finer-grained city info
+            # ("广东深圳") than the IP field alone — kept for content matching.
+            "aggregate_text": agg,
+            # Stats parsing requires more DOM observation; leave 0 for now.
+            "followers": 0,
+            "following": 0,
+            "likes_collected": 0,
         }
 
     async def get_user_notes(
