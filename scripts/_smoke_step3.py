@@ -12,6 +12,7 @@ import sqlite3
 from findit.ai.filter_rules import UserFilter
 from findit.config import settings
 from findit.crawler.client import XHSClient
+from findit.db import Database
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,6 +41,7 @@ def _comment_authors_since(db_path: str, since_iso: str) -> list[tuple[str, str]
 async def main():
     SINCE = "2026-05-05T18:30"
     db_path = str(settings.db_path)
+    db = Database(db_path)
     candidates = _comment_authors_since(db_path, SINCE)
     log.info("step3 candidates: %d (no/partial profile IP)", len(candidates))
 
@@ -77,17 +79,12 @@ async def main():
             if consecutive_ok >= 3:
                 consecutive_hits = 0
             profiles[uid] = p
-            # Persist authoritative IP and mark profile_crawled_at so a
-            # rerun skips this author.
-            with sqlite3.connect(db_path) as conn:
-                conn.execute(
-                    """UPDATE authors
-                       SET ip_location = ?, bio = ?,
-                           profile_crawled_at = datetime('now'),
-                           updated_at = datetime('now')
-                       WHERE id = ?""",
-                    (p.get("ip_location") or "", p.get("bio") or "", uid),
-                )
+            # Persist via the same upsert path the runner uses, so all
+            # fields land (followers/following/likes/notes_summary/age),
+            # not just IP+bio. Then mark profile_crawled_at to skip on
+            # rerun.
+            db.upsert_author(p)
+            db.mark_profile_crawled(uid)
     finally:
         await client.close()
 
