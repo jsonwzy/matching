@@ -64,8 +64,8 @@ async def main():
                     p.get("rate_limit_reason", "?"), cool,
                 )
                 await asyncio.sleep(cool)
-                if consecutive_hits >= 10:
-                    log.error("aborting smoke after 10 consecutive 风控 hits")
+                if consecutive_hits >= 5:
+                    log.error("aborting smoke after 5 consecutive 风控 hits")
                     break
                 continue
 

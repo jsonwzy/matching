@@ -172,8 +172,8 @@ class CrawlRunner:
         #   2nd                 → 15s
         #   3rd                 → 20s
         #   ...                 → 10 + 5*(n-1)
-        # Only abort after 10 consecutive hits — at that point the account
-        # is genuinely blocked and the runner should yield to a human.
+        # Abort after 5 consecutive hits — at that point the account is
+        # genuinely blocked and the runner should yield to a human.
         # Reset to 0 after 3 consecutive successful profiles.
         consecutive_hits = 0
         consecutive_ok = 0
@@ -198,8 +198,8 @@ class CrawlRunner:
                     profile.get("rate_limit_reason", "?"), cool,
                 )
                 await asyncio.sleep(cool)
-                if consecutive_hits >= 10:
-                    logger.error("step3 aborting: 10 consecutive 风控 hits")
+                if consecutive_hits >= 5:
+                    logger.error("step3 aborting: 5 consecutive 风控 hits")
                     break
                 continue
 
