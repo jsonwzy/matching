@@ -172,11 +172,16 @@ _SCRAPE_COMMENTS_JS = r"""
 # deliberately broad — if XHS adds a new wording the worst case is one
 # extra request before backoff, but we'd rather over-detect than under.
 RISK_CONTROL_TEXT_MARKERS = [
+    # 频次类
     "请求太频繁", "请求过于频繁", "访问过于频繁", "操作太频繁",
     "操作过于频繁", "请稍后再试", "稍后再试",
-    "账号存在异常", "存在异常行为", "异常请求",
-    "需要验证", "完成验证", "滑动验证", "拼图验证",
-    "请输入验证码",
+    # 异常账号类
+    "账号存在异常", "存在异常行为", "异常请求", "当前账号存在异常",
+    # 验证码 / 滑块 / 拼图
+    "需要验证", "完成验证", "滑动验证", "拼图验证", "请输入验证码",
+    # APP 扫码二次校验（XHS 常用）—
+    # "为保护账号安全，请使用已登录该账号的「小红书APP」扫码验证身份"
+    "为保护账号安全", "扫码验证身份", "扫码验证",
 ]
 RISK_CONTROL_URL_MARKERS = ["captcha", "verify", "block", "punish"]
 
