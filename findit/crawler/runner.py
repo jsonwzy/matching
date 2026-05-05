@@ -166,6 +166,16 @@ class CrawlRunner:
         scraped = 0
         batch_size = settings.crawl_profile_batch_size
         batch_pause = settings.crawl_profile_batch_pause_sec
+
+        # Adaptive back-off when 风控 fires:
+        #   1st consecutive hit → 120s pause
+        #   2nd consecutive hit → 240s
+        #   3rd                 → 480s
+        #   ...capped at 1800s (30 min)
+        # Reset to 0 after 3 successful profiles in a row.
+        consecutive_hits = 0
+        consecutive_ok = 0
+
         for i, uid in enumerate(author_ids[:limit]):
             if i > 0 and i % batch_size == 0:
                 logger.info(
@@ -175,13 +185,33 @@ class CrawlRunner:
                 await asyncio.sleep(batch_pause)
 
             profile = await self.client.get_user_profile(uid)
-            if not profile.get("nickname"):
+
+            if profile.get("rate_limited"):
+                consecutive_hits += 1
+                consecutive_ok = 0
+                cool = min(120 * (2 ** (consecutive_hits - 1)), 1800)
+                logger.warning(
+                    "step3 风控 #%d on %s (%s) — cooling down %.0fs",
+                    consecutive_hits, uid,
+                    profile.get("rate_limit_reason", "?"), cool,
+                )
+                await asyncio.sleep(cool)
+                # If we've been blocked 3 times in a row, give up this run —
+                # account state needs human attention.
+                if consecutive_hits >= 3:
+                    logger.error("step3 aborting: 3 consecutive 风控 hits")
+                    break
                 continue
 
-            # Skip get_user_notes for now — extra navigations per profile
-            # double the rate-limit pressure and step 3 currently doesn't
-            # use notes_summary in the matchmaker filter beyond optional
-            # content matching, which the bio + comment text already cover.
+            if not profile.get("nickname"):
+                # Empty profile but no 风控 banner — likely a deleted/
+                # private user. Don't count as a 风控 hit.
+                continue
+
+            consecutive_ok += 1
+            if consecutive_ok >= 3:
+                consecutive_hits = 0  # cooled off, reset back-off
+
             self.db.upsert_author(profile)
             self.db.mark_profile_crawled(uid)
             scraped += 1

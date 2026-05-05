@@ -167,6 +167,20 @@ _SCRAPE_COMMENTS_JS = r"""
 """
 
 
+# Markers XHS shows when its risk-control trips. We watch for these in the
+# page body and the URL after every profile navigation. The list is
+# deliberately broad — if XHS adds a new wording the worst case is one
+# extra request before backoff, but we'd rather over-detect than under.
+RISK_CONTROL_TEXT_MARKERS = [
+    "请求太频繁", "请求过于频繁", "访问过于频繁", "操作太频繁",
+    "操作过于频繁", "请稍后再试", "稍后再试",
+    "账号存在异常", "存在异常行为", "异常请求",
+    "需要验证", "完成验证", "滑动验证", "拼图验证",
+    "请输入验证码",
+]
+RISK_CONTROL_URL_MARKERS = ["captcha", "verify", "block", "punish"]
+
+
 _LOGIN_PROBE_JS = r"""
 () => {
     // any visible login modal/qr → NOT logged in
@@ -470,6 +484,34 @@ class XHSClient:
             settings.crawl_profile_delay_max,
         ))
 
+    async def detect_rate_limit(self) -> tuple[bool, str]:
+        """Inspect the current page for risk-control markers.
+
+        Returns (is_rate_limited, signal). `signal` is a short reason
+        suitable for logging. Cheap to call after every navigation.
+        """
+        if self._page is None:
+            return False, ""
+        try:
+            body = await self._page.evaluate(
+                "() => (document.body && document.body.innerText) "
+                "         ? document.body.innerText.slice(0, 3000) : ''"
+            )
+        except Exception:
+            return False, ""
+        if isinstance(body, str):
+            for marker in RISK_CONTROL_TEXT_MARKERS:
+                if marker in body:
+                    return True, f"text:{marker}"
+        try:
+            url = (self._page.url or "").lower()
+        except Exception:
+            url = ""
+        for u_marker in RISK_CONTROL_URL_MARKERS:
+            if u_marker in url:
+                return True, f"url:{u_marker}"
+        return False, ""
+
     async def get_user_profile(self, user_id: str) -> dict[str, Any]:
         """Scrape /user/profile/<user_id>. Returns nickname/bio/IP/age.
 
@@ -484,6 +526,21 @@ class XHSClient:
         await self._profile_sleep()
         try:
             await self._navigate(f"{WWW_HOST}/user/profile/{user_id}", settle_sec=4.0)
+        except Exception:
+            logger.exception("profile navigate failed for %s", user_id)
+            return {"id": user_id}
+
+        # Realtime risk-control check. We do this BEFORE reading any
+        # profile fields — when 风控 fires, the page either redirects to
+        # a verify URL or replaces the body with a "请求太频繁" notice.
+        hit, reason = await self.detect_rate_limit()
+        if hit:
+            logger.warning("⚠️  风控 detected on %s (%s) — backing off",
+                           user_id, reason)
+            return {"id": user_id, "rate_limited": True,
+                    "rate_limit_reason": reason}
+
+        try:
             data = await self._page.evaluate(r"""
                 () => {
                     const text = sel => {
