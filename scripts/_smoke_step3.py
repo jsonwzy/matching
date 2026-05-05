@@ -43,7 +43,8 @@ async def main():
     client = XHSClient()
     await client.setup()
     profiles: dict[str, dict] = {}
-    rate_limit_hits = 0
+    consecutive_hits = 0
+    consecutive_ok = 0
     try:
         for i, uid in enumerate(ids):
             log.info("(%d/%d) profile %s", i + 1, len(ids), uid)
@@ -54,18 +55,23 @@ async def main():
                 continue
 
             if p.get("rate_limited"):
-                rate_limit_hits += 1
+                consecutive_hits += 1
+                consecutive_ok = 0
+                cool = 10 + (consecutive_hits - 1) * 5
                 log.warning(
-                    "⚠️  风控 #%d on %s (%s) — pausing 5min",
-                    rate_limit_hits, uid, p.get("rate_limit_reason", "?"),
+                    "⚠️  风控 #%d on %s (%s) — cooling down %ds",
+                    consecutive_hits, uid,
+                    p.get("rate_limit_reason", "?"), cool,
                 )
-                await asyncio.sleep(300)
-                if rate_limit_hits >= 2:
-                    log.error("aborting smoke after %d 风控 hits",
-                              rate_limit_hits)
+                await asyncio.sleep(cool)
+                if consecutive_hits >= 10:
+                    log.error("aborting smoke after 10 consecutive 风控 hits")
                     break
                 continue
 
+            consecutive_ok += 1
+            if consecutive_ok >= 3:
+                consecutive_hits = 0
             profiles[uid] = p
             # Persist authoritative IP
             with sqlite3.connect(db_path) as conn:

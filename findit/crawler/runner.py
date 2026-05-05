@@ -167,12 +167,14 @@ class CrawlRunner:
         batch_size = settings.crawl_profile_batch_size
         batch_pause = settings.crawl_profile_batch_pause_sec
 
-        # Adaptive back-off when 风控 fires:
-        #   1st consecutive hit → 120s pause
-        #   2nd consecutive hit → 240s
-        #   3rd                 → 480s
-        #   ...capped at 1800s (30 min)
-        # Reset to 0 after 3 successful profiles in a row.
+        # Linear back-off when 风控 fires:
+        #   1st consecutive hit → 10s
+        #   2nd                 → 15s
+        #   3rd                 → 20s
+        #   ...                 → 10 + 5*(n-1)
+        # Only abort after 10 consecutive hits — at that point the account
+        # is genuinely blocked and the runner should yield to a human.
+        # Reset to 0 after 3 consecutive successful profiles.
         consecutive_hits = 0
         consecutive_ok = 0
 
@@ -189,17 +191,15 @@ class CrawlRunner:
             if profile.get("rate_limited"):
                 consecutive_hits += 1
                 consecutive_ok = 0
-                cool = min(120 * (2 ** (consecutive_hits - 1)), 1800)
+                cool = 10 + (consecutive_hits - 1) * 5
                 logger.warning(
-                    "step3 风控 #%d on %s (%s) — cooling down %.0fs",
+                    "step3 风控 #%d on %s (%s) — cooling down %ds",
                     consecutive_hits, uid,
                     profile.get("rate_limit_reason", "?"), cool,
                 )
                 await asyncio.sleep(cool)
-                # If we've been blocked 3 times in a row, give up this run —
-                # account state needs human attention.
-                if consecutive_hits >= 3:
-                    logger.error("step3 aborting: 3 consecutive 风控 hits")
+                if consecutive_hits >= 10:
+                    logger.error("step3 aborting: 10 consecutive 风控 hits")
                     break
                 continue
 
