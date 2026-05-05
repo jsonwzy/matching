@@ -168,16 +168,15 @@ class CrawlRunner:
         batch_pause = settings.crawl_profile_batch_pause_sec
 
         # Linear back-off when 风控 fires:
-        #   1st consecutive hit → 15s
-        #   2nd                 → 20s
-        #   3rd                 → 25s
-        #   ...                 → 15 + 5*(n-1)
-        # 10s was empirically too short to matter — see the 2026-05-05
-        # smoke run where 10/15/20/25/30s totaled 100s and never broke
-        # out of the rate window. Start at 15.
-        # Abort after 5 consecutive hits — at that point the account is
-        # genuinely blocked and the runner should yield to a human.
-        # Reset to 0 after 3 consecutive successful profiles.
+        #   1st consecutive hit → 25s
+        #   2nd                 → 30s
+        #   3rd                 → 35s
+        #   ...                 → 25 + 5*(n-1)
+        # Abort after 5 consecutive hits. The model is intentionally
+        # simple: short linear nudge while the rate window is breathing,
+        # but if 5 hits stack up the account needs a real cool-off and
+        # the user should re-run later — better than sitting on a long
+        # in-script wait. Reset back-off after 3 successful profiles.
         consecutive_hits = 0
         consecutive_ok = 0
 
@@ -194,7 +193,7 @@ class CrawlRunner:
             if profile.get("rate_limited"):
                 consecutive_hits += 1
                 consecutive_ok = 0
-                cool = 15 + (consecutive_hits - 1) * 5
+                cool = 25 + (consecutive_hits - 1) * 5
                 logger.warning(
                     "step3 风控 #%d on %s (%s) — cooling down %ds",
                     consecutive_hits, uid,
