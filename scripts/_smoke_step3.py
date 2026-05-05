@@ -21,14 +21,18 @@ log = logging.getLogger("smoke_step3")
 
 
 def _comment_authors_since(db_path: str, since_iso: str) -> list[str]:
-    # Take every fresh comment-author. We need to overwrite the
-    # comment-time IP with the authoritative profile IP regardless of
-    # what step-2 wrote.
+    # Fresh comment authors that haven't been profile-scraped yet.
+    # We check both signals: profile_crawled_at (set by new smoke runs)
+    # AND a non-empty ip_location (set by all prior successful scrapes
+    # whether or not they touched profile_crawled_at).
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
             """SELECT DISTINCT a.id
                FROM posts p JOIN authors a ON a.id = p.author_id
-               WHERE p.crawled_at >= ? AND p.source_type = 'comment'""",
+               WHERE p.crawled_at >= ?
+                 AND p.source_type = 'comment'
+                 AND a.profile_crawled_at IS NULL
+                 AND (a.ip_location IS NULL OR a.ip_location = '')""",
             (since_iso,),
         ).fetchall()
         return [r[0] for r in rows]
@@ -73,11 +77,14 @@ async def main():
             if consecutive_ok >= 3:
                 consecutive_hits = 0
             profiles[uid] = p
-            # Persist authoritative IP
+            # Persist authoritative IP and mark profile_crawled_at so a
+            # rerun skips this author.
             with sqlite3.connect(db_path) as conn:
                 conn.execute(
                     """UPDATE authors
-                       SET ip_location = ?, bio = ?, updated_at = datetime('now')
+                       SET ip_location = ?, bio = ?,
+                           profile_crawled_at = datetime('now'),
+                           updated_at = datetime('now')
                        WHERE id = ?""",
                     (p.get("ip_location") or "", p.get("bio") or "", uid),
                 )
