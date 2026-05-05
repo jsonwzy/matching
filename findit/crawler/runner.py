@@ -64,11 +64,14 @@ class CrawlRunner:
                             "avatar_url": note.get("user_avatar"),
                         })
 
+                    # image_urls intentionally empty: the product surfaces
+                    # post_url and lets users click through to XHS for
+                    # visuals — we don't mirror cover/photos.
                     self.db.upsert_post({
                         "id": note["id"],
                         "author_id": note["user_id"],
                         "content": note.get("content", ""),
-                        "image_urls": note.get("image_list", []),
+                        "image_urls": [],
                         "likes": _parse_int(note.get("likes", "0")),
                         "comments_count": 0,
                         "created_at": note.get("time"),
@@ -121,6 +124,13 @@ class CrawlRunner:
                     })
 
                 comment_id = f"comment_{c['comment_id']}"
+                # Deep-link the comment URL: parent-note URL + the
+                # comment's DOM anchor. Browsers open the note page
+                # and scroll directly to that comment, so users
+                # following the link arrive at the right context to
+                # message the author.
+                parent_note_url = self.client.get_note_url(post["id"])
+                comment_url = f"{parent_note_url}#comment-{c['comment_id']}"
                 self.db.upsert_post({
                     "id": comment_id,
                     "author_id": user_id,
@@ -130,7 +140,7 @@ class CrawlRunner:
                     "comments_count": 0,
                     "created_at": c.get("create_time"),
                     "crawled_at": datetime.now().isoformat(),
-                    "post_url": self.client.get_note_url(post["id"]),
+                    "post_url": comment_url,
                     "source_type": "comment",
                 })
                 found += 1

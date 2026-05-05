@@ -630,9 +630,34 @@ class XHSClient:
         if not isinstance(data, dict):
             return {"id": user_id}
 
+        # Parse the .user-info aggregate text. Observed format:
+        #   "<nick or empty>26岁广东深圳5关注69粉丝226获赞与收藏关注"
+        # so we regex out age and the three stat counts. Each may be
+        # missing — small accounts hide age, brand-new accounts have 0
+        # in any slot, etc.
         agg = data.get("aggregate_text") or ""
         age_match = re.search(r"(\d{1,2})岁", agg)
         age_tag = age_match.group(1) + "岁" if age_match else ""
+
+        def _count(pattern: str) -> int:
+            m = re.search(pattern, agg)
+            if not m:
+                return 0
+            raw = m.group(1)
+            # XHS shows e.g. "1.2万" for 12_000 — translate.
+            if "万" in raw:
+                try:
+                    return int(float(raw.replace("万", "")) * 10000)
+                except Exception:
+                    return 0
+            try:
+                return int(raw)
+            except Exception:
+                return 0
+
+        following = _count(r"([\d.]+万?)关注")
+        followers = _count(r"([\d.]+万?)粉丝")
+        likes_collected = _count(r"([\d.]+万?)获赞")
 
         notes_summary = []
         for n in (data.get("notes") or []):
@@ -654,11 +679,10 @@ class XHSClient:
             "ip_location": data.get("ip_location", ""),
             "bio": data.get("bio", ""),
             "age_tag": age_tag,
-            "aggregate_text": agg,
             "notes_summary": notes_summary,
-            "followers": 0,
-            "following": 0,
-            "likes_collected": 0,
+            "followers": followers,
+            "following": following,
+            "likes_collected": likes_collected,
         }
 
     async def get_user_notes(
