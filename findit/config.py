@@ -31,8 +31,8 @@ class Settings(BaseSettings):
     # comment pages — bursts at the search-page cadence (~9s/req) trip XHS
     # 风控 ("请求太频繁") within ~10 requests. Use a longer, more
     # human-paced delay between profile pages.
-    crawl_profile_delay_min: float = 20.0
-    crawl_profile_delay_max: float = 40.0
+    crawl_profile_delay_min: float = 10.0
+    crawl_profile_delay_max: float = 25.0
     # After every N profiles, take an extra long break (no requests at all).
     crawl_profile_batch_size: int = 5
     crawl_profile_batch_pause_sec: float = 180.0

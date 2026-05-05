@@ -57,7 +57,7 @@ async def main():
             if p.get("rate_limited"):
                 consecutive_hits += 1
                 consecutive_ok = 0
-                cool = 10 + (consecutive_hits - 1) * 5
+                cool = 15 + (consecutive_hits - 1) * 5
                 log.warning(
                     "⚠️  风控 #%d on %s (%s) — cooling down %ds",
                     consecutive_hits, uid,
