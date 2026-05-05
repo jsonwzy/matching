@@ -517,19 +517,43 @@ class XHSClient:
                 return True, f"url:{u_marker}"
         return False, ""
 
-    async def get_user_profile(self, user_id: str) -> dict[str, Any]:
-        """Scrape /user/profile/<user_id>. Returns nickname/bio/IP/age.
+    async def get_user_profile(
+        self, user_id: str, nickname: str | None = None
+    ) -> dict[str, Any]:
+        """Scrape /user/profile/<user_id>. Returns basics + a digest of
+        the user's own posted notes (id, title, likes) — same page, no
+        extra navigation.
+
+        Anti-detection: when `nickname` is given, we first navigate to a
+        search-results page for that nickname and dwell briefly. The
+        subsequent profile-page request then carries a Referer of the
+        search page, which is what an organic "user discovered via search
+        → click" flow looks like. Hitting profile URLs directly with no
+        upstream Referer is the pattern XHS rate-limits hardest. Falling
+        back to a direct goto if no nickname is given.
 
         DOM contract (verified on a real profile page 2026-05-05):
           .user-name      → nickname
           .user-desc      → bio
           .user-IP        → "IP属地：广东"  (province granularity)
-          .user-info      → aggregate text including age + city when present,
+          .user-info      → aggregate text incl. age + city when present
                             e.g. "26岁广东深圳5关注69粉丝226获赞与收藏"
-          .basic-info     → "<nick>小红书号：<id> IP属地：<prov>"
+          section.note-item / .note-item (note grid)
+              → each card: a[href*="/explore/<id>"], .title, .count
         """
         await self._profile_sleep()
         try:
+            if nickname:
+                from urllib.parse import quote
+                search_url = (
+                    f"{WWW_HOST}/search_result?keyword={quote(nickname)}"
+                    "&source=web_search_result_notes"
+                )
+                # Warm-up: same-tab navigation establishes the search
+                # page as the Referer for the next request.
+                await self._navigate(
+                    search_url, settle_sec=random.uniform(2.0, 4.0)
+                )
             await self._navigate(f"{WWW_HOST}/user/profile/{user_id}", settle_sec=4.0)
         except Exception:
             logger.exception("profile navigate failed for %s", user_id)
@@ -561,14 +585,41 @@ class XHSClient:
                     const avatar = document.querySelector(
                         '.user-avatar img, .avatar img, img[class*="avatar"]'
                     );
-                    // strip "IP属地：" prefix → just the province/municipality
                     const ip = ip_raw.replace(/^IP属地[：:]\s*/, '').trim();
+
+                    // Note grid on this same page. We deliberately drop
+                    // cover image URL — the product surfaces a profile/
+                    // post link, users click through for visuals.
+                    const notes = [];
+                    const cards = document.querySelectorAll(
+                        'section.note-item, .note-item'
+                    );
+                    cards.forEach(card => {
+                        const a = card.querySelector('a[href*="/explore/"]')
+                               || card.querySelector('a');
+                        if (!a) return;
+                        const m = (a.getAttribute('href') || '')
+                                  .match(/\/explore\/([0-9a-f]+)/);
+                        if (!m) return;
+                        const note_id = m[1];
+                        const tEl = card.querySelector('a.title') ||
+                                    card.querySelector('.title');
+                        const cEl = card.querySelector('.like-wrapper .count') ||
+                                    card.querySelector('.count');
+                        notes.push({
+                            note_id,
+                            title: tEl ? (tEl.textContent || '').trim() : '',
+                            like_count_text: cEl ? (cEl.textContent || '').trim() : '0',
+                        });
+                    });
+
                     return {
                         nickname: nick,
                         bio: desc,
                         ip_location: ip,
                         aggregate_text: aggregate,
                         avatar_url: avatar ? (avatar.getAttribute('src') || '') : '',
+                        notes,
                     };
                 }
             """)
@@ -583,6 +634,19 @@ class XHSClient:
         age_match = re.search(r"(\d{1,2})岁", agg)
         age_tag = age_match.group(1) + "岁" if age_match else ""
 
+        notes_summary = []
+        for n in (data.get("notes") or []):
+            try:
+                like = int(re.sub(r"\D", "",
+                                  n.get("like_count_text") or "0") or 0)
+            except Exception:
+                like = 0
+            notes_summary.append({
+                "note_id": n.get("note_id", ""),
+                "title": n.get("title", ""),
+                "like_count": like,
+            })
+
         return {
             "id": user_id,
             "nickname": data.get("nickname", ""),
@@ -590,10 +654,8 @@ class XHSClient:
             "ip_location": data.get("ip_location", ""),
             "bio": data.get("bio", ""),
             "age_tag": age_tag,
-            # Profile aggregate text often carries finer-grained city info
-            # ("广东深圳") than the IP field alone — kept for content matching.
             "aggregate_text": agg,
-            # Stats parsing requires more DOM observation; leave 0 for now.
+            "notes_summary": notes_summary,
             "followers": 0,
             "following": 0,
             "likes_collected": 0,

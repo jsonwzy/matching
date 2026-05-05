@@ -34,7 +34,7 @@ class TestStep3ScrapeProfiles:
         db.mark_profile_crawled("p3")
 
         client = MagicMock()
-        client.get_user_profile = AsyncMock(side_effect=lambda uid: {
+        client.get_user_profile = AsyncMock(side_effect=lambda uid, nickname=None: {
             "id": uid,
             "nickname": f"new_{uid}",
             "bio": "爱生活",
@@ -48,7 +48,9 @@ class TestStep3ScrapeProfiles:
         # Only p1 is pending_profile + uncrawled; p2 is filtered, p3 already done.
         assert scraped == 1
         assert client.get_user_profile.await_count == 1
-        client.get_user_profile.assert_awaited_with("p1")
+        # Runner now passes nickname so the client can do a search-warmup
+        # before navigating to the profile (anti-detection).
+        client.get_user_profile.assert_awaited_with("p1", nickname="old1")
 
         a1 = db.get_author("p1")
         assert a1["profile_crawled_at"] is not None

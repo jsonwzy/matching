@@ -20,14 +20,13 @@ logging.basicConfig(
 log = logging.getLogger("smoke_step3")
 
 
-def _comment_authors_since(db_path: str, since_iso: str) -> list[str]:
+def _comment_authors_since(db_path: str, since_iso: str) -> list[tuple[str, str]]:
     # Fresh comment authors that haven't been profile-scraped yet.
-    # We check both signals: profile_crawled_at (set by new smoke runs)
-    # AND a non-empty ip_location (set by all prior successful scrapes
-    # whether or not they touched profile_crawled_at).
+    # Returns (user_id, nickname) so we can pass nickname into the
+    # client for the search-warmup navigation pattern.
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
-            """SELECT DISTINCT a.id
+            """SELECT DISTINCT a.id, a.nickname
                FROM posts p JOIN authors a ON a.id = p.author_id
                WHERE p.crawled_at >= ?
                  AND p.source_type = 'comment'
@@ -35,14 +34,14 @@ def _comment_authors_since(db_path: str, since_iso: str) -> list[str]:
                  AND (a.ip_location IS NULL OR a.ip_location = '')""",
             (since_iso,),
         ).fetchall()
-        return [r[0] for r in rows]
+        return [(r[0], r[1] or "") for r in rows]
 
 
 async def main():
     SINCE = "2026-05-05T18:30"
     db_path = str(settings.db_path)
-    ids = _comment_authors_since(db_path, SINCE)
-    log.info("step3 candidates: %d (no/partial profile IP)", len(ids))
+    candidates = _comment_authors_since(db_path, SINCE)
+    log.info("step3 candidates: %d (no/partial profile IP)", len(candidates))
 
     client = XHSClient()
     await client.setup()
@@ -50,10 +49,11 @@ async def main():
     consecutive_hits = 0
     consecutive_ok = 0
     try:
-        for i, uid in enumerate(ids):
-            log.info("(%d/%d) profile %s", i + 1, len(ids), uid)
+        for i, (uid, nickname) in enumerate(candidates):
+            log.info("(%d/%d) profile %s [search:%s]",
+                     i + 1, len(candidates), uid, nickname or "<no-nick>")
             try:
-                p = await client.get_user_profile(uid)
+                p = await client.get_user_profile(uid, nickname=nickname)
             except Exception:
                 log.exception("profile failed: %s", uid)
                 continue

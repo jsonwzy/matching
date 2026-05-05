@@ -188,7 +188,11 @@ class CrawlRunner:
                 )
                 await asyncio.sleep(batch_pause)
 
-            profile = await self.client.get_user_profile(uid)
+            # Pass nickname so the client can warm up via a search
+            # navigation first — see XHSClient.get_user_profile docstring.
+            existing = self.db.get_author(uid) or {}
+            nickname = existing.get("nickname") or None
+            profile = await self.client.get_user_profile(uid, nickname=nickname)
 
             if profile.get("rate_limited"):
                 consecutive_hits += 1
