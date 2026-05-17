@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+import time
 from datetime import datetime
 
 from findit.config import settings
@@ -148,61 +150,125 @@ class CrawlRunner:
         logger.info("Step 2 complete: found %d dating-intent comments", found)
         return found
 
-    async def step3_scrape_profiles(self, limit: int = 50) -> int:
-        """Scrape user profiles for authors still in pending_profile state.
+    def _build_step3_candidates(self, limit: int) -> list[dict]:
+        """For each pending author pick the best source post to enter
+        from. Returns up to `limit` candidates, each carrying:
+            user_id, nickname, source_note_id, comment_id, search_query
+        Ordering: prefer the author's own post over a comment they made
+        (their own post page renders the author at the top, richer
+        on-page context). Then prefer recent crawled_at.
 
-        Per `docs/DATA_SPEC.md` §1.3: only authors that survived early
-        filtering get a profile crawl. After a successful fetch we stamp
-        `profile_crawled_at` so `crawler_service.run_shared_filter(final=True)`
-        knows they're ready for final evaluation.
-
-        Profile pages are rate-limited much more aggressively than search
-        or comment pages. We pace via the client's `_profile_sleep` and
-        take a longer pause every `crawl_profile_batch_size` profiles.
+        search_query is a random pick from
+        settings.crawl_dating_search_keywords — same generic terms a
+        real Shenzhen user would type ("深圳找对象", "深圳脱单", ...),
+        not the specific post title. Real users browse a generic feed,
+        click whatever catches their eye, then check the author. If the
+        target post isn't on page 1 of the search results, the client
+        falls back to direct goto-explore (B1).
         """
-        author_ids = self.db.get_unscraped_author_ids(limit=limit)
+
+        import re
+        candidates: list[dict] = []
+        seen: set[str] = set()
+        keywords = settings.crawl_dating_search_keywords or ()
+
         with self.db._conn() as conn:
-            rows = conn.execute(
-                """SELECT id FROM authors
-                   WHERE crawl_state='pending_profile'
-                     AND profile_crawled_at IS NULL
-                   LIMIT ?""",
-                (limit,),
-            ).fetchall()
-            for r in rows:
-                if r["id"] not in author_ids:
-                    author_ids.append(r["id"])
+            rows = conn.execute("""
+                SELECT
+                    a.id AS user_id,
+                    a.nickname,
+                    p.id AS post_pk,
+                    p.source_type,
+                    p.post_url,
+                    p.content
+                FROM authors a
+                JOIN posts p ON p.author_id = a.id
+                WHERE a.profile_crawled_at IS NULL
+                  AND a.is_filtered_out = 0
+                ORDER BY a.id,
+                    CASE p.source_type WHEN 'post' THEN 0 ELSE 1 END,
+                    p.crawled_at DESC
+            """).fetchall()
+
+        for r in rows:
+            uid = r["user_id"]
+            if uid in seen:
+                continue
+            seen.add(uid)
+
+            if r["source_type"] == "post":
+                source_note_id = r["post_pk"]
+                comment_id = None
+            else:  # 'comment'
+                m = re.search(r"/explore/([0-9a-f]+)", r["post_url"] or "")
+                if not m:
+                    continue
+                source_note_id = m.group(1)
+                comment_id = (r["post_pk"] or "").removeprefix("comment_")
+
+            search_query = random.choice(keywords) if keywords else None
+
+            candidates.append({
+                "user_id": uid,
+                "nickname": r["nickname"],
+                "source_note_id": source_note_id,
+                "comment_id": comment_id,
+                "search_query": search_query,
+            })
+            if len(candidates) >= limit:
+                break
+
+        return candidates
+
+    async def step3_scrape_profiles(self, limit: int = 50) -> int:
+        """Scrape user profiles for authors still pending step3, using
+        the comment-page click path (see XHSClient.get_user_profile_via_click).
+
+        Per `docs/DATA_SPEC.md` §1.3: after a successful fetch we stamp
+        `profile_crawled_at` so the shared filter knows the author is
+        ready for final evaluation.
+
+        Profile pages are rate-limited much more aggressively than
+        search or comment pages. We pace via the client's
+        `_profile_sleep` and take a longer pause every
+        `crawl_profile_batch_size` profiles.
+        """
+        candidates = self._build_step3_candidates(limit)
+        logger.info("step3: %d candidates queued", len(candidates))
+
 
         scraped = 0
         batch_size = settings.crawl_profile_batch_size
-        batch_pause = settings.crawl_profile_batch_pause_sec
 
         # Linear back-off when 风控 fires:
         #   1st consecutive hit → 25s
         #   2nd                 → 30s
         #   3rd                 → 35s
         #   ...                 → 25 + 5*(n-1)
-        # Abort after 5 consecutive hits. The model is intentionally
-        # simple: short linear nudge while the rate window is breathing,
-        # but if 5 hits stack up the account needs a real cool-off and
-        # the user should re-run later — better than sitting on a long
-        # in-script wait. Reset back-off after 3 successful profiles.
+        # Abort after 5 consecutive hits. Reset back-off after 3
+        # successful profiles. navigation_failed is a soft skip and
+        # does NOT count toward the abort counter.
         consecutive_hits = 0
         consecutive_ok = 0
 
-        for i, uid in enumerate(author_ids[:limit]):
+        for i, c in enumerate(candidates):
             if i > 0 and i % batch_size == 0:
+                batch_pause = random.uniform(
+                    settings.crawl_profile_batch_pause_min,
+                    settings.crawl_profile_batch_pause_max,
+                )
                 logger.info(
                     "step3 batch pause: scraped %d so far, sleeping %.0fs",
                     i, batch_pause,
                 )
                 await asyncio.sleep(batch_pause)
 
-            # Pass nickname so the client can warm up via a search
-            # navigation first — see XHSClient.get_user_profile docstring.
-            existing = self.db.get_author(uid) or {}
-            nickname = existing.get("nickname") or None
-            profile = await self.client.get_user_profile(uid, nickname=nickname)
+            profile = await self.client.get_user_profile_via_click(
+                user_id=c["user_id"],
+                source_note_id=c["source_note_id"],
+                comment_id=c.get("comment_id"),
+                search_query=c.get("search_query"),
+            )
 
             if profile.get("rate_limited"):
                 consecutive_hits += 1
@@ -210,7 +276,7 @@ class CrawlRunner:
                 cool = 25 + (consecutive_hits - 1) * 5
                 logger.warning(
                     "step3 风控 #%d on %s (%s) — cooling down %ds",
-                    consecutive_hits, uid,
+                    consecutive_hits, c["user_id"],
                     profile.get("rate_limit_reason", "?"), cool,
                 )
                 await asyncio.sleep(cool)
@@ -219,17 +285,24 @@ class CrawlRunner:
                     break
                 continue
 
+            if profile.get("navigation_failed"):
+                # Click chain couldn't complete (target not visible).
+                # Soft skip — don't mark profile_crawled_at, don't
+                # bump 风控 counter. Author stays in pending queue.
+                logger.info("step3 nav failed for %s — soft skip", c["user_id"])
+                continue
+
             if not profile.get("nickname"):
-                # Empty profile but no 风控 banner — likely a deleted/
+                # Empty profile but no 风控 banner — likely deleted /
                 # private user. Don't count as a 风控 hit.
                 continue
 
             consecutive_ok += 1
             if consecutive_ok >= 3:
-                consecutive_hits = 0  # cooled off, reset back-off
+                consecutive_hits = 0  # cooled off
 
             self.db.upsert_author(profile)
-            self.db.mark_profile_crawled(uid)
+            self.db.mark_profile_crawled(c["user_id"])
             scraped += 1
 
         logger.info("Step 3 complete: scraped %d profiles", scraped)
@@ -310,6 +383,280 @@ class CrawlRunner:
 
         logger.info("Step 4 complete: parsed %d user profiles", processed)
         return processed
+
+    async def sweep_keyword(
+        self, keyword: str, pages: int = 1,
+        include_commenters: bool = True,
+        max_posts: int | None = None,
+    ) -> dict[str, int]:
+        """Single-session sweep: keyword search → click each post →
+        click each author/commenter, all within one live SPA session.
+
+        Replaces step1+step2+step3 for fresh data. xsec_tokens stay
+        valid throughout because we never break the click chain. Posts
+        get persisted with their xsec_token in case a follow-up run
+        wants to re-enter (within token TTL).
+
+        Aborts the whole sweep on the first 风控 hit — the entire
+        session's auth is now suspect. The caller should re-run later.
+
+        Args:
+          keyword: e.g. "深圳找对象"
+          pages: how many pages of search results to walk (1-3 typical)
+          include_commenters: also click into dating-intent commenters
+            on each post. Set False for a fast post-author-only smoke.
+          max_posts: cap the total post cards processed across all pages.
+            None = no cap. Used to keep test runs small (e.g. 5).
+
+        Returns:
+          {"posts_seen": N, "post_authors": N, "commenters": N,
+           "unavailable": N, "modal_blocked": N, "rate_limited": bool}
+
+        modal_blocked counts posts gated by XHS's per-note app-scan
+        modal ("当前笔记暂时无法浏览 / 请打开 App 扫码") — a per-POST
+        soft skip, kept separate from `unavailable` (real 404s) and
+        never escalated to a 风控 abort.
+        """
+        stats = {
+            "posts_seen": 0, "post_authors": 0, "commenters": 0,
+            "unavailable": 0, "modal_blocked": 0, "rate_limited": False,
+        }
+
+        # Don't re-scrape authors we already have profiles for.
+        with self.db._conn() as conn:
+            already = {
+                r["id"] for r in conn.execute(
+                    "SELECT id FROM authors WHERE profile_crawled_at IS NOT NULL"
+                ).fetchall()
+            }
+
+        async def _try_scrape_user(uid: str, where: str) -> str:
+            """click → scrape → go_back. Returns one of:
+              'ok', 'rate_limited', 'failed', 'skipped'.
+            """
+            if not uid:
+                return "skipped"
+            if uid in already:
+                logger.info("  ↩ %s already scraped — skipping [%s]", uid, where)
+                return "skipped"
+            logger.info("  → click into %s [%s]", uid, where)
+            profile = await self.client.click_user_link_to_profile(uid)
+            if profile.get("rate_limited"):
+                logger.warning("  ✗ %s 风控 [%s]: %s", uid, where,
+                              profile.get("rate_limit_reason"))
+                return "rate_limited"
+            if profile.get("navigation_failed"):
+                logger.info("  ✗ %s nav failed [%s]", uid, where)
+                if "/user/profile/" in (self.client._page.url or ""):
+                    await self.client.go_back(expect_url_part="/explore/")
+                return "failed"
+            if not profile.get("nickname"):
+                logger.info("  ✗ %s empty profile [%s]", uid, where)
+                await self.client.go_back(expect_url_part="/explore/")
+                return "failed"
+            self.db.upsert_author(profile)
+            self.db.mark_profile_crawled(uid)
+            already.add(uid)
+            logger.info("  ✓ scraped %s (%s) [%s]",
+                       uid, profile.get("nickname"), where)
+            await self.client.go_back(expect_url_part="/explore/")
+            return "ok"
+
+        processed = 0
+        for page in range(1, pages + 1):
+            if max_posts is not None and processed >= max_posts:
+                break
+            cards = await self.client.search_notes(keyword, page=page)
+            # OBSERVATION ONLY — log if a verification/captcha marker is
+            # showing on the search page (the spot detect_rate_limit's
+            # abort path doesn't cover). Does not abort or change flow.
+            await self.client.observe_risk_markers(f"search:{keyword}")
+            if not cards:
+                logger.info("sweep: no results for '%s' page %d", keyword, page)
+                continue
+            if max_posts is not None:
+                cards = cards[: max_posts - processed]
+            logger.info("sweep: '%s' page %d → %d post cards",
+                       keyword, page, len(cards))
+
+            for idx, card in enumerate(cards, start=1):
+                processed += 1
+                note_id = card["id"]
+                xsec = card.get("xsec_token", "")
+                post_author_id = card.get("user_id") or ""
+                logger.info(
+                    "▶ [%d/%d] post=%s author=%s", idx, len(cards),
+                    note_id, post_author_id or "<none>",
+                )
+
+                # Open the note by direct navigation with its xsec_token
+                # (captured from the search scrape), NOT by clicking the
+                # search card. A goto doesn't depend on the search page
+                # still being mounted and leaves browser history clean —
+                # the commenter loop re-opens the note repeatedly, and a
+                # go_back chain can't survive that. Same URL shape as a
+                # search-result click (xsec_source=pc_search).
+                opened = await self.client.open_note(note_id, xsec)
+                if not opened:
+                    logger.info("  ✗ couldn't open post %s — skipping", note_id)
+                    continue
+
+                # On /explore/<note_id> now. Check for trouble.
+                gone, why = await self.client.detect_post_unavailable()
+                if gone:
+                    stats["unavailable"] += 1
+                    logger.info("  ✗ post %s unavailable (%s)", note_id, why)
+                    continue
+                hit, reason = await self.client.detect_rate_limit()
+                if hit:
+                    logger.error(
+                        "sweep aborting: 风控 on explore %s (%s)",
+                        note_id, reason,
+                    )
+                    stats["rate_limited"] = True
+                    return stats
+
+                stats["posts_seen"] += 1
+                post_started = time.monotonic()
+
+                # Scrape the note's own title + body. For a dating post
+                # the body ("相亲帖正文") carries more than any comment —
+                # height / education / requirements live there. Falls
+                # back to the search-card title if the body didn't render.
+                note = await self.client.scrape_note_body()
+                note_text = "\n".join(
+                    t for t in (note.get("title"), note.get("body")) if t
+                ) or card.get("content", "")
+
+                # Upsert author FIRST — posts.author_id has a FK
+                # constraint to authors.id, so the author row must exist
+                # before we insert the post.
+                if post_author_id:
+                    self.db.upsert_author({
+                        "id": post_author_id,
+                        "nickname": card.get("user_nickname"),
+                        "avatar_url": card.get("user_avatar"),
+                    })
+                self.db.upsert_post({
+                    "id": note_id,
+                    "author_id": post_author_id,
+                    "content": note_text,
+                    "image_urls": [],
+                    "likes": _parse_int(card.get("likes", "0")),
+                    "comments_count": 0,
+                    "created_at": None,
+                    "crawled_at": datetime.now().isoformat(),
+                    "post_url": self.client.get_note_url(note_id),
+                    "source_type": "post",
+                    "xsec_token": xsec,
+                    "parent_note_id": note_id,
+                })
+
+                # Scrape comments NOW — before the post-author detour.
+                # XHS's app-scan modal ("当前笔记暂时无法浏览") surfaces
+                # ~15-20s after the note loads; the author scrape would
+                # burn that whole window. Grab + persist the dating-intent
+                # comments here so the data survives even if the note then
+                # gets gated. The commenter PROFILE scrape happens later,
+                # only on a non-gated note.
+                dating: list[dict] = []
+                if include_commenters:
+                    comments = await self.client.scrape_comments_on_current_page()
+                    dating = self.client.filter_dating_comments(comments)
+                    logger.info("  post %s: %d comments, %d dating-intent",
+                               note_id, len(comments), len(dating))
+                    for c in dating:
+                        cuid = c.get("user_id") or ""
+                        if not cuid:
+                            continue
+                        # Upsert author stub first (FK constraint)
+                        self.db.upsert_author({
+                            "id": cuid,
+                            "nickname": c.get("nickname"),
+                            "avatar_url": c.get("avatar"),
+                        })
+                        self.db.upsert_post({
+                            "id": f"comment_{c['comment_id']}",
+                            "author_id": cuid,
+                            "content": c.get("content", ""),
+                            "image_urls": [],
+                            "likes": c.get("like_count", 0),
+                            "comments_count": 0,
+                            "created_at": None,
+                            "crawled_at": datetime.now().isoformat(),
+                            "post_url": (
+                                f"{self.client.get_note_url(note_id)}"
+                                f"#comment-{c['comment_id']}"
+                            ),
+                            "source_type": "comment",
+                            "parent_note_id": note_id,
+                        })
+
+                # Click into post author. An author's /user/profile page
+                # stays reachable even when the note itself gets gated, so
+                # this is safe to run after the comment scrape.
+                result = await _try_scrape_user(post_author_id, "post author")
+                if result == "rate_limited":
+                    stats["rate_limited"] = True
+                    return stats
+                if result == "ok":
+                    stats["post_authors"] += 1
+
+                # By now the app-scan modal has had time to surface if
+                # this note is gated — close it and count it. It's a
+                # per-POST block, NOT account 风控; detect_rate_limit ran
+                # above already so a real 风控 banner still aborts first.
+                note_gated = await self.client.dismiss_modal() == "app_scan"
+                if note_gated:
+                    stats["modal_blocked"] += 1
+                    logger.info("  ⊘ post %s app-scan gated", note_id)
+
+                # Full commenter profile scrape — only on a non-gated
+                # note. (The comments themselves were already scraped +
+                # persisted above, gated or not.)
+                if include_commenters and not note_gated:
+                    # Drop commenters already in the DB BEFORE the loop —
+                    # each iteration re-opens the note (a full page nav),
+                    # so there's no point paying that just to discover
+                    # we'd skip. (Cuts the bulk of the wasted time.)
+                    fresh = [
+                        c for c in dating
+                        if (c.get("user_id") or "")
+                        and c["user_id"] not in already
+                    ]
+                    n_skip = len(dating) - len(fresh)
+                    if n_skip:
+                        logger.info(
+                            "  ↩ %d commenter(s) already scraped — skipping",
+                            n_skip,
+                        )
+                    for c in fresh:
+                        cuid = c["user_id"]
+                        # Re-open the note fresh before each commenter.
+                        # go_back from the previous profile lands on a
+                        # bare /explore URL (XHS drops the xsec_token)
+                        # that renders no comment list — re-navigating
+                        # with the token restores it so the link is found.
+                        if not await self.client.open_note(note_id, xsec):
+                            logger.info(
+                                "  ✗ couldn't reopen note %s for commenter %s",
+                                note_id, cuid,
+                            )
+                            continue
+                        result = await _try_scrape_user(cuid, "commenter")
+                        if result == "rate_limited":
+                            stats["rate_limited"] = True
+                            return stats
+                        if result == "ok":
+                            stats["commenters"] += 1
+
+                logger.info("  ⏱ post %s done in %.0fs",
+                           note_id, time.monotonic() - post_started)
+                # Next post is reached by its own open_note() — no
+                # go_back chain to unwind. Just a short human-paced gap.
+                await asyncio.sleep(random.uniform(2.0, 4.0))
+
+        return stats
 
     async def run_full_pipeline(self, include_profiles: bool = False) -> dict[str, int]:
         """Run the crawl pipeline.

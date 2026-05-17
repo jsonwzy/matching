@@ -1,5 +1,25 @@
 # FindIt 项目当前状态
 
+## 2026-05-17 进展 — 爬虫重做 + 数据完整 + 离线清洗
+
+**单会话 sweep 爬虫（`crawler/runner.py` 的 `sweep_keyword`）跑通跑稳：**
+- 搜索 → 开帖（`open_note`，goto 驱动）→ 抓帖子正文 + 评论 → 抓作者/评论者主页，全程一个登录会话。
+- modal 真关闭（`dismiss_modal`，ESC）；`pointer-events` 继承坑修复；`go_back` 落到无 token 裸 URL 改为 token 重导航。
+- 多城市：深圳/广州/北京/上海 × 找对象/找男友/找女友/脱单/交友（`scripts/_smoke_sweep_multi.py`）。
+- 节奏：抖动 3–10s（随机性 > 时长）；Fix1/2 提速；10+ 轮测试 0 风控、0 nav-failed。
+
+**数据完整性：**
+- 帖子正文入库（`scrape_note_body` → `post.content` 标题+正文）。
+- `posts.parent_note_id` — 评论 ↔ 父帖可直接 JOIN。
+- `authors.homepage_url` — 每个作者的主页 URL。
+- DB 迁移自愈幂等（`_migrate_in_place`）。
+
+**离线清洗（DATA_SPEC §2/§3，`scripts/backfill_filter.py`）：**
+- 按 §3（红娘 / 中介 agency 短语 / 代发）+ §2（入库门槛）给每个作者盖 `crawl_state`。
+- Rule A 修复「不是红娘」误杀；「中介」用 agency 白名单避免误杀真人。
+- §2 IP 门槛放宽为「IP 非空 或 正文提到城市」。
+- 结果：`kept` 207 / `filtered_out` 60 / `pending_profile` 2014。
+
 ## ✅ 已完成功能
 
 ### 1. 数据采集（基于 MediaCrawler）
@@ -42,12 +62,12 @@
 - [ ] 错误重试机制
 - [ ] 增量更新策略
 
-## 📊 数据统计
+## 📊 数据统计（2026-05-17）
 
-- **总帖子数**：55
-- **作者数**：55
-- **评论数**：35（交友相关）
-- **已提取标签**：0（等待 API 配置）
+- **总帖子数**：416
+- **评论数**：1952
+- **作者数**：2281（已爬主页 266）
+- **匹配池（crawl_state=kept）**：207
 
 ## 🛠️ 技术栈
 

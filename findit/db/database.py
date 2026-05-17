@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS posts (
     crawled_at TEXT NOT NULL,
     post_url TEXT,
     source_type TEXT NOT NULL DEFAULT 'post',  -- 'post' or 'comment'
+    parent_note_id TEXT,                       -- the /explore/<id> note this row belongs to
     FOREIGN KEY (author_id) REFERENCES authors(id)
 );
 
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS authors (
     filter_reason TEXT,
     crawl_state TEXT DEFAULT 'pending_profile',  -- pending_profile | kept | filtered_out (DATA_SPEC.md §2)
     profile_crawled_at TEXT,                     -- Step 3 完成时间; NULL 表示主页未爬
+    homepage_url TEXT,                           -- https://www.xiaohongshu.com/user/profile/<id>
     updated_at TEXT
 );
 
@@ -194,18 +196,68 @@ class Database:
         if existing_up and "family" not in existing_up:
             conn.execute("ALTER TABLE user_profiles ADD COLUMN family TEXT")
 
+        existing_p = {
+            r["name"] for r in conn.execute("PRAGMA table_info(posts)").fetchall()
+        }
+        if "xsec_token" not in existing_p:
+            # Posts on /explore/<id> need ?xsec_token=...&xsec_source=pc_search
+            # to load; without it XHS 404s. Token is short-lived but persisting
+            # it lets a follow-up run re-enter a post within its TTL.
+            conn.execute("ALTER TABLE posts ADD COLUMN xsec_token TEXT DEFAULT ''")
+
+        if "parent_note_id" not in existing_p:
+            # The /explore/<id> note a row belongs to. For a post row it
+            # IS the note; for a comment row it's the note the comment
+            # sits under — a clean JOIN key (previously only buried in
+            # the post_url string).
+            conn.execute("ALTER TABLE posts ADD COLUMN parent_note_id TEXT")
+        # Backfill parent_note_id wherever it's missing. Idempotent —
+        # WHERE parent_note_id IS NULL makes re-runs no-ops.
+        conn.execute(
+            "UPDATE posts SET parent_note_id = id "
+            "WHERE source_type = 'post' AND parent_note_id IS NULL"
+        )
+        # comment post_url is .../explore/<note_id> optionally + #comment-<cid>
+        # — extract the id whether or not the #comment fragment is there.
+        conn.execute(
+            "UPDATE posts SET parent_note_id = substr("
+            "  post_url, instr(post_url, '/explore/') + 9, "
+            "  CASE WHEN instr(post_url, '#') > 0 "
+            "       THEN instr(post_url, '#') - instr(post_url, '/explore/') - 9 "
+            "       ELSE length(post_url) END) "
+            "WHERE source_type = 'comment' AND parent_note_id IS NULL "
+            "  AND instr(post_url, '/explore/') > 0"
+        )
+
+        if "homepage_url" not in existing:
+            conn.execute("ALTER TABLE authors ADD COLUMN homepage_url TEXT")
+        # Backfill homepage_url wherever it's missing — purely derivable
+        # from the author id (the XHS uid). Idempotent.
+        conn.execute(
+            "UPDATE authors SET homepage_url = "
+            "  'https://www.xiaohongshu.com/user/profile/' || id "
+            "WHERE homepage_url IS NULL OR homepage_url = ''"
+        )
+
     # ── Posts ────────────────────────────────────────────────────────────
 
     def upsert_post(self, post: dict[str, Any]) -> None:
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO posts (id, platform, author_id, content, image_urls,
-                   likes, comments_count, created_at, crawled_at, post_url, source_type)
+                   likes, comments_count, created_at, crawled_at, post_url,
+                   source_type, xsec_token, parent_note_id)
                    VALUES (:id, :platform, :author_id, :content, :image_urls,
-                   :likes, :comments_count, :created_at, :crawled_at, :post_url, :source_type)
+                   :likes, :comments_count, :created_at, :crawled_at, :post_url,
+                   :source_type, :xsec_token, :parent_note_id)
                    ON CONFLICT(id) DO UPDATE SET
                    content=excluded.content, likes=excluded.likes,
-                   comments_count=excluded.comments_count, crawled_at=excluded.crawled_at""",
+                   comments_count=excluded.comments_count,
+                   crawled_at=excluded.crawled_at,
+                   parent_note_id=COALESCE(excluded.parent_note_id,
+                                           posts.parent_note_id),
+                   xsec_token=CASE WHEN excluded.xsec_token != '' THEN
+                       excluded.xsec_token ELSE posts.xsec_token END""",
                 {
                     "id": post["id"],
                     "platform": post.get("platform", "xiaohongshu"),
@@ -218,6 +270,8 @@ class Database:
                     "crawled_at": post.get("crawled_at", datetime.now().isoformat()),
                     "post_url": post.get("post_url"),
                     "source_type": post.get("source_type", "post"),
+                    "xsec_token": post.get("xsec_token", ""),
+                    "parent_note_id": post.get("parent_note_id"),
                 },
             )
 
@@ -500,16 +554,18 @@ class Database:
             conn.execute(
                 """INSERT INTO authors (id, nickname, avatar_url, ip_location,
                    followers, following, likes_collected, bio, age_tag,
-                   notes_summary, updated_at)
+                   notes_summary, homepage_url, updated_at)
                    VALUES (:id, :nickname, :avatar_url, :ip_location,
                    :followers, :following, :likes_collected, :bio, :age_tag,
-                   :notes_summary, :updated_at)
+                   :notes_summary, :homepage_url, :updated_at)
                    ON CONFLICT(id) DO UPDATE SET
                    nickname=excluded.nickname, avatar_url=excluded.avatar_url,
                    ip_location=excluded.ip_location, followers=excluded.followers,
                    following=excluded.following, likes_collected=excluded.likes_collected,
                    bio=excluded.bio, age_tag=excluded.age_tag,
-                   notes_summary=excluded.notes_summary, updated_at=excluded.updated_at""",
+                   notes_summary=excluded.notes_summary,
+                   homepage_url=excluded.homepage_url,
+                   updated_at=excluded.updated_at""",
                 {
                     "id": author["id"],
                     "nickname": author.get("nickname"),
@@ -521,6 +577,10 @@ class Database:
                     "bio": author.get("bio"),
                     "age_tag": author.get("age_tag"),
                     "notes_summary": json.dumps(author.get("notes_summary", []), ensure_ascii=False),
+                    "homepage_url": (
+                        "https://www.xiaohongshu.com/user/profile/"
+                        + str(author["id"])
+                    ),
                     "updated_at": datetime.now().isoformat(),
                 },
             )
@@ -540,6 +600,22 @@ class Database:
                    filter_reason=?, crawl_state=?, updated_at=? WHERE id=?""",
                 (is_real_person, int(is_filtered_out), filter_reason,
                  crawl_state, datetime.now().isoformat(), author_id),
+            )
+
+    def set_classification(self, author_id: str, crawl_state: str,
+                           filter_reason: str | None = None) -> None:
+        """Stamp an author's DATA_SPEC §2/§3 verdict — crawl_state +
+        filter_reason — without touching AI scores (is_real_person).
+        Keeps the legacy is_filtered_out boolean in sync. Used by the
+        offline classification pass (scripts/backfill_filter.py).
+        """
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE authors SET crawl_state=?, filter_reason=?,
+                   is_filtered_out=?, updated_at=? WHERE id=?""",
+                (crawl_state, filter_reason,
+                 1 if crawl_state == "filtered_out" else 0,
+                 datetime.now().isoformat(), author_id),
             )
 
     def mark_profile_crawled(self, author_id: str) -> None:

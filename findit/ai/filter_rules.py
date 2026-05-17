@@ -52,9 +52,35 @@ CITY_DISTRICTS = {
              "萧山", "临平", "钱塘", "富阳"],
 }
 
+# Flat set of every city + district name. §2 uses it to decide an author
+# is "locatable" even when XHS didn't expose an IP.
+_LOCATION_TOKENS = set(CITY_PROVINCE_MAP) | {
+    d for ds in CITY_DISTRICTS.values() for d in ds
+}
+
 # ── Rule A: matchmaker keyword ──────────────────────────────────────────
 
 MATCHMAKER_KEYWORD = "红娘"
+
+# "红娘" inside one of these is a real person *disclaiming* being a
+# matchmaker ("这是本人发的，不是相亲红娘"), not a matchmaker. Masked out
+# before the Rule A check so it doesn't false-positive on genuine daters.
+MATCHMAKER_KEYWORD_NEGATIONS = [
+    "不是红娘", "不是相亲红娘", "不是婚介红娘", "不是中介红娘",
+    "我不是红娘", "非红娘", "非中介红娘", "拒绝红娘", "不收红娘",
+    "谢绝红娘", "红娘勿扰", "红娘勿加", "红娘退散", "红娘绕道",
+    "红娘别来", "不要红娘", "无关红娘",
+]
+
+# "中介" can't be a bare keyword — genuine daters write "中介勿扰 /
+# 拒绝中介" constantly, so a bare match would false-positive massively.
+# It only counts as a matchmaker signal inside an explicit agency
+# phrase, i.e. where the author is identifying AS an agency.
+MATCHMAKER_AGENCY_PHRASES = [
+    "婚恋中介", "相亲中介", "情感中介", "婚介中介", "中介红娘",
+    "中介服务", "专业中介", "中介公司", "中介机构", "中介团队",
+    "我是中介", "本中介", "做中介",
+]
 
 # ── Rule B: proxy-post (代发) signals ────────────────────────────────────
 
@@ -66,6 +92,7 @@ PROXY_POST_KEYWORDS = [
     "非本人", "不是本人", "不是我本人",
     # 本人不在
     "本人不在小红书", "本人没小红书", "本人不刷小红书",
+    "本人不玩小红书", "本人很少上小红书",
 ]
 # 注：早期版本曾把"已获本人同意/经本人同意/本人同意"也当代发关键词，
 # 实际数据中误伤法律披露语境（如"其本人同意公开"用于诉讼证据）。
@@ -76,6 +103,11 @@ PROXY_POST_PATTERNS = [
     re.compile(r"代[一-龥]{1,3}发"),   # 代闺蜜发 / 代表妹发
     re.compile(r"帮[一-龥]{1,3}发"),   # 帮朋友发 / 帮表姐发
     re.compile(r"替[一-龥]{1,3}发"),   # 替哥哥发
+    # 帮/替/代 + a relative → posting on someone else's behalf
+    re.compile(
+        r"[帮替代]\s*(我\s*)?(弟弟|哥哥|姐姐|妹妹|表弟|表哥|表姐"
+        r"|表妹|儿子|女儿|侄子|侄女|外甥|闺蜜|同事)"
+    ),
 ]
 
 
@@ -88,6 +120,39 @@ def _parse_notes(author: dict) -> list[dict]:
         except (json.JSONDecodeError, TypeError):
             return []
     return notes if isinstance(notes, list) else []
+
+
+def _is_matchmaker_text(text: str) -> bool:
+    """True if `text` identifies the author AS a matchmaker.
+
+    - "红娘": counts on its own, but disclaimer phrases ("不是红娘",
+      "红娘勿扰") are masked out first so genuine daters aren't flagged.
+    - "中介": NOT a bare keyword — daters write "中介勿扰 / 拒绝中介"
+      constantly. Only counts inside an explicit agency phrase
+      (婚恋中介 / 中介服务 / 我是中介 / ...).
+    """
+    if MATCHMAKER_KEYWORD in text:
+        cleaned = text
+        for neg in MATCHMAKER_KEYWORD_NEGATIONS:
+            cleaned = cleaned.replace(neg, "")
+        if MATCHMAKER_KEYWORD in cleaned:
+            return True
+    if any(phrase in text for phrase in MATCHMAKER_AGENCY_PHRASES):
+        return True
+    return False
+
+
+def _mentions_a_city(author: dict, posts: list[dict]) -> bool:
+    """True if the author's text (nickname / bio / posts / notes) names
+    any known city or district — used by §2 as a fallback when XHS
+    didn't expose an IP."""
+    parts = [author.get("nickname") or "", author.get("bio") or ""]
+    parts.extend((p.get("content") or "") for p in posts)
+    for note in _parse_notes(author):
+        parts.append(note.get("title") or "")
+        parts.append(note.get("content") or "")
+    blob = " ".join(parts)
+    return any(tok in blob for tok in _LOCATION_TOKENS)
 
 
 # ── Shared Filter (user-independent) ───────────────────────────────────
@@ -149,7 +214,7 @@ class SharedFilter:
             haystacks.append(note.get("content") or "")
 
         for text in haystacks:
-            if MATCHMAKER_KEYWORD in text:
+            if _is_matchmaker_text(text):
                 return False, "matchmaker_keyword"
         return True, None
 
@@ -169,7 +234,12 @@ class SharedFilter:
     def _check_min_quality(
         self, author: dict, posts: list[dict]
     ) -> tuple[bool, str | None]:
-        if not (author.get("ip_location") or "").strip():
+        # §2 location bar (relaxed 2026-05-17): an author is "locatable"
+        # if XHS showed an IP OR their text names a city/district — same
+        # two-signal logic UserFilter uses for matching. XHS often hides
+        # IP, and requiring it alone discarded ~half of crawled profiles.
+        ip = (author.get("ip_location") or "").strip()
+        if not ip and not _mentions_a_city(author, posts):
             return False, "low_quality_content"
         bio = (author.get("bio") or "").strip()
         substantial_post = any(

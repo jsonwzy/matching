@@ -52,6 +52,32 @@ class TestSharedFilterRuleA:
         assert keep is True
         assert reason is None
 
+    def test_keeps_红娘_in_disclaimer(self):
+        """A genuine dater who disclaims being a 红娘 ('不是红娘' / '红娘
+        勿扰') must NOT be filtered by Rule A."""
+        for text in ["这是本人发的，不是相亲红娘", "本人非红娘中介",
+                     "红娘勿扰", "拒绝红娘"]:
+            author = {"nickname": "小花", "bio": text}
+            keep, _ = self.f.evaluate(author)
+            assert keep is True, f"{text!r} disclaims being 红娘 — should pass"
+
+    def test_filters_中介_agency_phrase(self):
+        """'中介' inside an explicit agency phrase → matchmaker."""
+        for text in ["专业婚恋中介", "我是中介帮你牵线", "情感中介机构"]:
+            author = {"nickname": "小王", "bio": text}
+            keep, reason = self.f.evaluate(author)
+            assert keep is False, f"{text!r} should be filtered"
+            assert reason == "matchmaker_keyword"
+
+    def test_keeps_中介勿扰_disclaimer(self):
+        """A genuine dater writing '中介勿扰' must NOT be filtered — bare
+        '中介' is not a keyword, only agency phrases are."""
+        for text in ["真诚找对象，中介勿扰", "本人征婚，拒绝中介",
+                     "98年女生想脱单 中介别加我"]:
+            author = {"nickname": "小花", "bio": text, "ip_location": "深圳"}
+            keep, _ = self.f.evaluate(author)
+            assert keep is True, f"{text!r} disclaims 中介 — should pass"
+
     def test_no_longer_filters_old_keywords(self):
         """Old keywords (婚介/牵线/加微/进群) are no longer in scope per spec."""
         for word in ["婚介服务", "牵线搭桥", "加微信咨询", "进群了解"]:
@@ -149,6 +175,13 @@ class TestSharedFilterMinQuality:
         keep, reason = self.f.evaluate(author, posts=posts, final=True)
         assert keep is False
         assert reason == "low_quality_content"
+
+    def test_passes_without_ip_when_content_mentions_city(self):
+        """Relaxed §2: no IP, but the text names a city/district → kept."""
+        author = {"nickname": "小花", "bio": "", "ip_location": ""}
+        posts = [{"content": "98年女生在深圳南山工作，想找个对象"}]
+        keep, _ = self.f.evaluate(author, posts=posts, final=True)
+        assert keep is True
 
     def test_passes_with_ip_location_and_bio(self):
         author = {"nickname": "小花", "bio": "爱生活", "ip_location": "深圳"}

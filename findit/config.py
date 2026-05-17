@@ -27,19 +27,32 @@ class Settings(BaseSettings):
     crawl_interval_hours: int = 24
     crawl_request_delay_min: float = 2.0
     crawl_request_delay_max: float = 5.0
-    # Profile-page scraping has a much tighter rate limit than search /
-    # comment pages — bursts at the search-page cadence (~9s/req) trip XHS
-    # 风控 ("请求太频繁") within ~10 requests. Use a longer, more
-    # human-paced delay between profile pages.
-    crawl_profile_delay_min: float = 10.0
-    crawl_profile_delay_max: float = 25.0
+    # Delay between profile-page scrapes. What trips XHS 风控 is robotic
+    # *uniformity* (a fixed-cadence burst), not the raw gap length — so
+    # keep this short but well-jittered. These numbers are a tunable
+    # starting point: adjust them by testing, never collapse the range
+    # to a constant. See memory feedback_xhs_rate_limit.
+    crawl_profile_delay_min: float = 3.0
+    crawl_profile_delay_max: float = 10.0
     # After every N profiles, take an extra long break (no requests at all).
     crawl_profile_batch_size: int = 5
-    crawl_profile_batch_pause_sec: float = 180.0
+    # Randomized batch pause: pick uniformly from [min, max] each batch.
+    crawl_profile_batch_pause_min: float = 40.0
+    crawl_profile_batch_pause_max: float = 60.0
     crawl_max_retries: int = 3
     crawl_retry_base_delay: float = 5.0
     crawl_request_timeout: float = 30.0
     crawl_proxy: str = ""
+    # Generic dating-search keywords used by the B2 click path. A random
+    # one is picked per profile to mirror what a real user types into
+    # search: "深圳找对象" not "深圳90年男生身高180蹲一个". The post-title
+    # path was tried first and produced too-narrow queries that almost
+    # never surfaced the target post in results.
+    crawl_dating_search_keywords: tuple[str, ...] = (
+        "深圳找对象", "深圳找男友", "深圳找女友",
+        "深圳脱单", "深圳交友", "深圳cpdd",
+        "深圳相亲", "深圳恋爱",
+    )
 
     # Playwright browser timeouts (milliseconds)
     playwright_page_timeout: int = 30000
